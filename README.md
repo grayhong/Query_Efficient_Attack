@@ -1,7 +1,8 @@
 # Query Efficient Attack
 Tensorflow implementation of [Query-efficient Black-box Adversarial Examples](https://arxiv.org/abs/1712.07113)
 
-Check `QueryEfficient.ipynb` for the result
+Check `QueryEfficient_MNIST.ipynb` for the result
+
 
 ## Reference
 
