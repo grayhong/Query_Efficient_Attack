@@ -3,6 +3,7 @@ import matplotlib.pyplot as plt
 import numpy as np
 import os
 
+from cifar10.include.model import model
 from ops import conv2d_t, lrelu, deconv2d, fully_connect, conv_cond_concat, batch_normal, squash, maxpool2d
 from utils import anti_sample, softmax
 from tensorflow.python.ops import tensor_array_ops, control_flow_ops
@@ -19,62 +20,46 @@ class Attacker(object):
         self.total_epoch = 100
         self.learning_rate = 5e-4
         self.batch_size = 100
-        self.n_input = 28 * 28
-        self.sample_size = 100
-        self.n_size = 28
+        self.sample_size = 10
+        self.n_input = 32 * 32 * 3
+        self.n_size = 32
+        self.n_channel = 3
         self.n_noise = 10
         self.n_hidden = 128
-        self.n_channel = 1
         self.n_class = 10
         self.sigma = 0.1
-        self.alpha = 0.0000001
+        self.alpha = 0.1
         self.grad_clip = 1.0
-        self.target_label = 7
+        self.target_label = target_label
         
-        self.checkpoint_dir = './checkpoints'
-        self.save_file_name = 'mnist_cnn_weight.ckpt'
+        self.checkpoint_dir = "./cifar10/tensorboard/cifar-10/"
         
         self.is_training = train
-        
-        ## Parameter Setting for Classifier
-        self.c_weights = {
-            'wc1' : tf.Variable(tf.random_normal([5, 5, 1, 32]), name = 'wc1'),
-            'wc2' : tf.Variable(tf.random_normal([5, 5, 32, 64]), name = 'wc2'),
-            # 7 since 2 times of max pooling (28->14->7)
-            'wd1' : tf.Variable(tf.random_normal([7*7*64, 1024]), name = 'wd1'),
-            'out' : tf.Variable(tf.random_normal([1024, self.n_class]), name = 'out_w'),
-        }
-
-        self.c_biases = {
-            'bc1' : tf.Variable(tf.random_normal([32]), name = 'bc1'),
-            'bc2' : tf.Variable(tf.random_normal([64]), name = 'bc2'),
-            'bd1' : tf.Variable(tf.random_normal([1024]), name = 'bd1'),
-            'out' : tf.Variable(tf.random_normal([self.n_class]), name = 'out_b'),
-        }
-        
-        self.C_var_list = [self.c_weights[k] for k in self.c_weights.keys()] + [self.c_biases[k] for k in self.c_biases.keys()]
         
         self.build()
     
     def build(self):
         self.X = tf.placeholder(tf.float32, [None, self.n_input], name = 'gan_X')
-        self.classify = self.conv_net(self.X, self.c_weights, self.c_biases, 1)
+        self.Y = tf.placeholder(tf.float32, [None, self.n_class], name='cnn_Y')
+        self.x_image = tf.reshape(self.X, [-1, self.n_size, self.n_size, self.n_channel], name='images')
+        self.classify, _, _, self.C_var_list = model(self.x_image, self.Y)
         self.sess.run(tf.global_variables_initializer())
         # restore variables
         self.saver = tf.train.Saver(var_list = self.C_var_list)
-        self.saver.restore(self.sess, os.path.join(self.checkpoint_dir, self.save_file_name))
+        last_chk_path = tf.train.latest_checkpoint(checkpoint_dir=self.checkpoint_dir)
+        self.saver.restore(self.sess, save_path=last_chk_path)
         
     def attack(self, X, X_tar):
         # Starts with image in target class
-        k = 1
-        tau = 0.99
+        k = 2
+        tau = 0.95
+        eps = 1 * np.ones_like(X)
         
         for _ in range(10000):
             # backtracking line search
-            eps = 0.5 * np.ones_like(X)
             while self.predict(X)[0] < k: 
                 # X = self.l_inf_proj(X, X_tar, eps)
-                X = self.l_inf_proj2(X, X_tar, eps)
+                X = self.l_inf_proj(X, X_tar, eps)
                 eps = tau * eps
                 
             # projected gradient descent
@@ -86,21 +71,23 @@ class Attacker(object):
             prev_reward = curr_reward
             while prev_reward <= curr_reward:
                 # gradient ascent
-                X = X + self.alpha * est_grad
+                X = X + self.alpha * eps[0] * est_grad
+                X = np.clip(X, 0, 1)
 
                 prev_reward = curr_reward
                 curr_reward = self.predict(X)[1][self.target_label]
             
-            if _ % 10 == 0:
+            if _ % 1 == 0:
                 print("Query: {}, Epsilon: {}, Rank: {}".format(_, eps[0], self.predict(X)[0]))
                 print(curr_reward)
-                plt.imshow(np.reshape(X, (28, 28)), cmap=plt.get_cmap('gray'))
+                plt.imshow(np.reshape(X, (32, 32, 3)), cmap=plt.get_cmap('gray'))
                 plt.show()
     
     def predict(self, X):
         if len(X.shape) > 1:
             batch_size = X.shape[0]
-            output = self.sess.run(self.classify, feed_dict={self.X: X})
+            fake_arr = np.array([[1,0,0,0,0,0,0,0,0,0]])
+            output = self.sess.run(self.classify, feed_dict={self.X: X, self.Y: fake_arr})
             # output = [softmax(t) for t in output]
             rank = np.where(np.argsort(output) == self.target_label)[0][0]
         else:
@@ -145,24 +132,3 @@ class Attacker(object):
             
         apply = X_obj + sign * perturb
         return apply
-    
-    def conv_net(self, x, weights, biases, dropout):
-        x = tf.reshape(x, shape = [-1, 28, 28, 1])
-
-        conv1 = conv2d_t(x, weights['wc1'], biases['bc1'])
-        conv1 = maxpool2d(conv1, k=2)
-
-        conv2 = conv2d_t(conv1, weights['wc2'], biases['bc2'])
-        conv2 = maxpool2d(conv2, k=2)
-
-        fc1 = tf.reshape(conv2, [-1, weights['wd1'].get_shape().as_list()[0]])
-        fc1 = tf.add(tf.matmul(fc1, weights['wd1']), biases['bd1'])
-        fc1 = tf.nn.relu(fc1)
-        fc1 = tf.nn.dropout(fc1, dropout)
-
-        out = tf.add(tf.matmul(fc1, weights['out']), biases['out'])
-        #out = tf.nn.softmax(out)
-
-        return out
-
-

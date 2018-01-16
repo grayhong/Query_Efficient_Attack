@@ -1,5 +1,6 @@
 # Byte-compiled / optimized / DLL files
 mnist/
+data_set/
 __pycache__/
 *.py[cod]
 *$py.class
